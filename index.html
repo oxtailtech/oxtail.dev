@@ -28,7 +28,8 @@
 
     .field { position: relative; }
     .field canvas { display: block; }
-    #back { position: absolute; left: 0; top: 0; }
+    #back, .story { position: absolute; left: 0; top: 0; }
+    #field { position: relative; }   /* in front of the absolute layers */
     h1 { margin: 40px 0 0; font-size: 13px; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; }
     .contact { margin: 8px 0 0; }
     footer { margin-top: 56px; font-size: 11px; color: var(--muted); }
@@ -61,7 +62,7 @@
     // that fade, bud and meet and have children, and die of crowding or old age. The O turns into
     // an X and back, and a few slow LFOs with drifting rates push tempo, morph, wobble and trails.
     // Every 2-4 changes of kind there's a max: for a few seconds everything comes alive.
-    // Two black snakes cut through the letters and eat the trails.
+    // Two black snakes, LeWitt cubes on a beat or square stencils, cut through the letters and eat the trails.
     // Speed: the backdrop is its own canvas, redrawn only when the letters change; snake bodies are drawn
     // in a few runs of grey, and nothing runs while the field is hidden or scrolled away.
     (function () {
@@ -104,7 +105,7 @@
         var a = rand() * 6.28, b = rand() * 6.28, slow = period * (2.3 + rand() * 1.4);
         return function (t) { return Math.sin(2 * Math.PI * t / period + a + 1.6 * Math.sin(2 * Math.PI * t / slow + b)); };
       }
-      var LFO = { tempo: lfo(19), morph: lfo(31), wobble: lfo(13), trail: lfo(23), glow: lfo(11) };
+      var LFO = { tempo: lfo(19), morph: lfo(31), wobble: lfo(13), trail: lfo(23), glow: lfo(11), focus: lfo(17), rack: lfo(29) };
       var mod = { tempo: 1, morph: 1, wobble: 1, trail: 1, glow: 1 };
       function modulate(now) {
         mod.tempo = 1 + 0.35 * LFO.tempo(now);     // every snake a little faster or slower together
@@ -214,6 +215,15 @@
       var nextSwitch = 0, spawnAt = 0, renewAt = 0;
       var side, backDirty = true, clock = 0, running = false, onScreen = true;
       var back = document.getElementById('back'), bctx = back.getContext('2d');   // the backdrop, behind
+      // Stories: each resolution draws on its own canvas, fine at the back and coarse in front, so
+      // each can go in and out of focus on its own.
+      var under = canvas;
+      LAYERS.forEach(function (L, i) {
+        L.canvas = i ? document.createElement('canvas') : canvas;
+        L.ctx = i ? L.canvas.getContext('2d') : ctx;
+        L.blur = 0;
+        if (i) { L.canvas.className = 'story'; canvas.parentNode.insertBefore(L.canvas, under); under = L.canvas; }
+      });
 
       function newField() {
         LAYERS.forEach(buildLayer);
@@ -248,23 +258,111 @@
       }
 
       // ---- Shades ------------------------------------------------------------------------
-      // Black snakes: negative space. Two at a time, nearly always, slow and long. They
-      // cut through the letters and eat the trails, leaving a dark wake. A max clears them; they come back after.
-      var SHADE = { name: 'shade', pause: 0.15, turn: 0.05, stay: 0.92, layers: [0.4, 0.6, 0] };
+      // Black snakes: negative space, two at a time, nearly always. They cut through the letters
+      // and eat the trails. A max hides them; they come back after. Each takes one of two looks:
+      // - cubes (most): after Sol LeWitt. Whole cells, stepping one at a time on a shared beat like
+      //   a sequencer. Each carries a Euclidean rhythm along its body: hits are hatched with lines
+      //   in four directions, rests left as empty squares. A playhead runs down the body, lighting
+      //   what it passes. Pattern lengths differ, so two of them drift against each other.
+      // - stencil: a wide black band, square-ended, faintly rimmed, gliding like the others.
+      var SHADE = { name: 'shade', pause: 0.15, turn: 0.05, stay: 0.92 };
+      var BPM = 116 + Math.floor(rand() * 13), STEP = 60 / BPM / 4, beat = -1;   // sixteenths
+
+      function euclid(k, n) {                            // k hits spread as evenly as they go over n steps
+        var p = [];
+        for (var i = 0; i < n; i++) p.push((i * k) % n < k ? 1 : 0);
+        return p;
+      }
+
+      // Genes: each shade is born from a genome. What it eats is its reward: light keeps it alive
+      // (it burns a second of life a second, and eating buys more). When it dies its genes and
+      // result go into a pool; most new shades are children of the better of two from the pool,
+      // mutated. A ledger keeps a running average of the reward each gene value has earned, so
+      // newcomers are drawn toward what's been working.
+      var GENES = { look: ['cubes', 'cubes', 'stencil'], story: [0, 1], every: [1, 2, 4], n: [5, 7, 8, 12, 16], lean: [0, 1, 2, 3], tint: [0, 1] };
+      var pool = [], ledger = {};
+      function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+
+      function pick(k) {                                 // a gene value, weighted by what it has earned
+        var vals = GENES[k], w = vals.map(function (v) {
+          var e = ledger[k + v];
+          return e === undefined || !ledger.all ? 1.5 : clamp(0.5 + e / ledger.all, 0.2, 3);
+        }), r = rand() * w.reduce(function (a, b) { return a + b; }, 0);
+        for (var i = 0; i < vals.length; i++) { r -= w[i]; if (r <= 0) return vals[i]; }
+        return vals[vals.length - 1];
+      }
+
+      function newcomer() {
+        var g = { len: 0.6 + rand() * 0.9, fill: 0.2 + rand() * 0.6, rest: rand() * 0.35, pace: 1.6 + rand() * 1.6, gen: 0 };
+        for (var k in GENES) g[k] = pick(k);
+        return g;
+      }
+
+      function child() {
+        var a = pool[Math.floor(rand() * pool.length)], b = pool[Math.floor(rand() * pool.length)], p = (a.food >= b.food ? a : b).g, g = {};
+        for (var k in p) g[k] = p[k];
+        for (k in GENES) if (rand() < 0.15) g[k] = GENES[k][Math.floor(rand() * GENES[k].length)];
+        g.len = clamp(g.len * (0.8 + rand() * 0.45), 0.4, 1.8); g.fill = clamp(g.fill + (rand() - 0.5) * 0.2, 0.1, 0.9);
+        g.rest = clamp(g.rest + (rand() - 0.5) * 0.1, 0, 0.5); g.pace = clamp(g.pace * (0.85 + rand() * 0.3), 1.2, 4);
+        g.gen = p.gen + 1;
+        return g;
+      }
+
+      function remember(s) {                             // its result, into the pool and the ledger
+        pool.push({ g: s.g, food: s.food });
+        if (pool.length > 12) pool.shift();
+        ledger.all = ledger.all === undefined ? s.food : ledger.all + 0.2 * (s.food - ledger.all);
+        for (var k in GENES) { var e = ledger[k + s.g[k]]; ledger[k + s.g[k]] = e === undefined ? s.food : e + 0.2 * (s.food - e); }
+      }
 
       function shadeUp(now) {
         if (max || renewAt || shades.filter(function (s) { return !s.dying; }).length >= 2) return;
-        var L = pickLayer(SHADE.layers);
-        makeSnake(SHADE, L, randomInside(L), rand() < 0.5 ? 1 : -1, 0.5 + rand() * 0.5, 20 + rand() * 25, 1.6 + rand() * 1.6, 0, now, shades);
+        var g = pool.length > 2 && rand() < 0.75 ? child() : newcomer(), L = LAYERS[g.story], dir = rand() < 0.5 ? 1 : -1, z = 0.5 + rand() * 0.5;
+        if (g.look === 'stencil') makeSnake(SHADE, L, randomInside(L), dir, z, 30 * g.len, g.pace, 0, now, shades);
+        else {
+          var big = L.n < 27, h = Math.floor(randomInside(L));
+          shades.push({
+            kind: SHADE, L: L, h: h, t: h, dir: dir, z: z,
+            len: Math.max(3, Math.round((big ? 6 : 15) * g.len)),
+            every: big ? 4 : g.every,                    // sixteenths per cell
+            pattern: euclid(clamp(Math.round(g.fill * g.n), 1, g.n - 1), g.n), lean: g.lean, play: 0, rest: false,
+            alpha: 0, dying: false, inn: 1, outFor: 0, born: now
+          });
+        }
+        var s = shades[shades.length - 1];
+        s.look = g.look; s.g = g; s.food = 0; s.energy = 15; s.life = 60;
+        s.tint = g.tint && !shades.some(function (o) { return o !== s && !o.dying && o.tint; });   // one colour at a time
+      }
+
+      function shadeBeat(s, n) {                         // cubes, on each sixteenth
+        var L = s.L;
+        s.play = n % s.len;
+        if (n % 16 === 0) s.rest = rand() < s.g.rest;     // now and then a bar's rest
+        if (s.rest || n % s.every) return;
+        var next = s.h + s.dir;
+        if (next < 0 || next > L.last || (L.inside[s.h] && !L.inside[next] && rand() < SHADE.stay)) {
+          var t = s.t; s.t = s.h; s.h = t; s.dir = -s.dir;   // turn: the tail leads
+          return;
+        }
+        s.h = next;
+        if (Math.abs(s.h - s.t) >= s.len) s.t += s.dir;
       }
 
       function shadeLife(now, dt) {
+        var b = Math.floor(now / STEP);
         shades.forEach(function (s) {
-          if (now - s.born > s.life || (s.outFor > 4 && rand() < 0.5 * dt)) s.dying = true;
-          var L = s.L, a = Math.max(0, Math.floor(Math.min(s.h, s.t))), b = Math.min(L.last - 1, Math.ceil(Math.max(s.h, s.t)) - 1);
-          for (var j = a; j <= b; j++) L.heat[j] *= 1 - s.alpha;   // eats the light it passes over
+          if (s.look === 'cubes') {
+            if (b !== beat) shadeBeat(s, b);
+            s.alpha = s.dying ? s.alpha - dt / 1.2 : max ? Math.max(0, s.alpha - dt / 1.2) : Math.min(1, s.alpha + dt);
+            s.outFor = s.L.inside[s.h] ? 0 : s.outFor + dt;
+          }
+          var L = s.L, a = Math.max(0, Math.floor(Math.min(s.h, s.t))), z = Math.min(L.last - 1, Math.ceil(Math.max(s.h, s.t)) - 1), ate = 0;
+          for (var j = a; j <= z; j++) { ate += L.heat[j] * s.alpha; L.heat[j] *= 1 - s.alpha; }   // eats the light it passes over
+          s.food += ate; s.energy += 0.06 * ate - (max ? 0 : dt);   // a max is time off
+          if (s.energy <= 0 || now - s.born > s.life || (s.outFor > 4 && rand() < 0.5 * dt)) s.dying = true;
         });
-        shades = shades.filter(function (s) { return !(s.dying && s.alpha <= 0); });
+        beat = b;
+        shades = shades.filter(function (s) { if (s.dying && s.alpha <= 0) { remember(s); return false; } return true; });
       }
 
       // ---- Max ---------------------------------------------------------------------------
@@ -284,7 +382,6 @@
         };
         max.end = now + max.hold + max.dur;
         burst(Math.round(20 + rand() * 20), now);
-        shades.forEach(function (s) { s.dying = true; });   // the light wins
         rounds = 0; roundsToMax = 2 + Math.floor(rand() * 3);
         nextSwitch = max.end + 0.6;                      // then a new kind calms it down
       }
@@ -324,7 +421,7 @@
       }
 
       function move(s, dt, now) {
-        s.alpha = s.dying ? s.alpha - dt / 1.2 : Math.min(1, s.alpha + dt);
+        s.alpha = s.dying ? s.alpha - dt / 1.2 : max && s.kind === SHADE ? Math.max(0, s.alpha - dt / 1.2) : Math.min(1, s.alpha + dt);
         var k = s.kind, L = s.L;
         // How far inside the letters it is. Strays outside fade back and soon die.
         var isIn = L.inside[Math.max(0, Math.min(L.last, Math.floor(s.h)))];
@@ -406,11 +503,11 @@
         var dpr = Math.min(2, window.devicePixelRatio || 1);   // 3x screens gain nothing visible here
         side = Math.floor(Math.min((window.innerWidth - 32) / 2, window.innerHeight * 0.4, 260));
         LAYERS.forEach(function (L) { L.cell = side / L.n; });
-        canvas.style.width = back.style.width = 2 * side + 'px';
-        canvas.style.height = back.style.height = side + 'px';
-        canvas.width = Math.round(2 * side * dpr); canvas.height = Math.round(side * dpr);
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        back.width = canvas.width; back.height = canvas.height;
+        LAYERS.map(function (L) { return L.canvas; }).concat(back).forEach(function (c) {
+          c.style.width = 2 * side + 'px'; c.style.height = side + 'px';
+          c.width = Math.round(2 * side * dpr); c.height = Math.round(side * dpr);
+        });
+        LAYERS.forEach(function (L) { L.ctx.setTransform(dpr, 0, 0, dpr, 0, 0); });
         bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         backDirty = true;
       }
@@ -480,17 +577,49 @@
         });
       }
 
+      // Cubes: each cell blacked out and outlined; hits hatched, the lines turning a quarter at each.
+      function drawCubes(s) {
+        var L = s.L, c = L.cell, a = s.alpha, n = Math.abs(s.h - s.t) + 1, m = L.n < 27 ? 4 : 2, hits = 0, ink = s.tint ? visor : '237,237,237';
+        ctx.lineCap = 'butt'; ctx.lineJoin = 'miter'; ctx.lineWidth = 1;
+        for (var i = 0; i < n; i++) {
+          var p = at(L, s.h - s.dir * i), x = p[0] - c / 2 + 0.5, y = p[1] - c / 2 + 0.5, w = c - 1;
+          var lit = Math.exp(-((s.play - i + s.len) % s.len) * 0.6);   // the playhead, and its fading wake
+          ctx.fillStyle = 'rgba(0,0,0,' + a.toFixed(2) + ')'; ctx.fillRect(x, y, w, w);
+          ctx.strokeStyle = 'rgba(' + ink + ',' + (a * (0.14 + 0.2 * lit)).toFixed(3) + ')'; ctx.strokeRect(x, y, w, w);
+          if (!s.pattern[i % s.pattern.length]) continue;
+          ctx.strokeStyle = 'rgba(' + ink + ',' + (a * (0.22 + 0.45 * lit)).toFixed(3) + ')';
+          hatch(x, y, w, (s.lean + hits++) % 4, m);
+        }
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      }
+
+      function hatch(x, y, w, d, m) {                    // m lines in one of four directions: | - / \
+        ctx.beginPath();
+        for (var j = 1; j <= m; j++) {
+          var f = j / (m + 1) * w, u = 2 * f, lo = u - Math.min(u, w), hi = Math.min(u, w);
+          if (d === 0) { ctx.moveTo(x + f, y); ctx.lineTo(x + f, y + w); }
+          else if (d === 1) { ctx.moveTo(x, y + f); ctx.lineTo(x + w, y + f); }
+          else if (d === 2) { ctx.moveTo(x + lo, y + hi); ctx.lineTo(x + hi, y + lo); }
+          else { ctx.moveTo(x + w - lo, y + hi); ctx.lineTo(x + w - hi, y + lo); }
+        }
+        ctx.stroke();
+      }
+
       function drawSnake(s) {
+        if (s.look === 'cubes') { if (s.alpha > 0) drawCubes(s); return; }
         if (s.alpha <= 0 || Math.abs(s.h - s.t) < 0.01) return;
         var L = s.L, dir = s.h > s.t ? 1 : -1, span = Math.abs(s.h - s.t), stops = [s.t];
         for (var k = dir > 0 ? Math.floor(s.t) + 1 : Math.ceil(s.t) - 1; dir > 0 ? k < s.h : k > s.h; k += dir) stops.push(k);
         stops.push(s.h);
-        if (s.kind === SHADE) {                          // a wide black cut over everything behind it, faintly rimmed
+        if (s.kind === SHADE) {                          // stencil: a wide black cut, square-ended, faintly rimmed
           var w = L.cell * (0.5 + 0.3 * s.z);
           ctx.beginPath();
           stops.forEach(function (q, i) { var p = pointAt(L, q); if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); });
-          ctx.lineWidth = w + 2; ctx.strokeStyle = 'rgba(237,237,237,' + (0.22 * s.alpha).toFixed(3) + ')'; ctx.stroke();
-          ctx.lineWidth = w; ctx.strokeStyle = 'rgba(0,0,0,' + s.alpha.toFixed(2) + ')'; ctx.stroke();
+          ctx.lineCap = 'square'; ctx.lineJoin = 'miter';
+          ctx.lineWidth = w + 2; ctx.strokeStyle = 'rgba(' + (s.tint ? visor : '237,237,237') + ',' + (0.22 * s.alpha).toFixed(3) + ')'; ctx.stroke();
+          ctx.lineWidth = w; ctx.globalCompositeOperation = 'destination-out'; ctx.stroke();   // no rim showing through
+          ctx.globalCompositeOperation = 'source-over'; ctx.strokeStyle = 'rgba(0,0,0,' + s.alpha.toFixed(2) + ')'; ctx.stroke();
+          ctx.lineCap = 'round'; ctx.lineJoin = 'round';
           return;
         }
         var near = Math.min(1, (0.25 + 0.75 * s.z) * (0.3 + 0.7 * s.inn) * (1 + 0.6 * rush));
@@ -541,7 +670,7 @@
 
         if (now - maskAt > 0.12) updateMask(now);
         if (now >= shadeAt) { shadeUp(now); shadeAt = now + 1; }
-        snakes.concat(shades).forEach(function (s) { move(s, dt, now); });
+        snakes.concat(shades).forEach(function (s) { if (s.look !== 'cubes') move(s, dt, now); });
         if (!renewAt) live(now, dt);
         snakes = snakes.filter(function (s) { return !(s.dying && s.alpha <= 0); });
         sparks = sparks.filter(function (p) { return now - p.born < 0.8; });
@@ -557,28 +686,51 @@
         ghost += (ghostTarget - ghost) * Math.min(1, dt * 1.5);
       }
 
+      // The one colour: the visor's, drifting between cyan and amber, a round trip every 48 s.
+      var CYAN = [95, 225, 255], AMBER = [255, 176, 64], visor = '';
+      function tint(now) {
+        var m = 0.5 - 0.5 * Math.cos(2 * Math.PI * now / 48);
+        visor = CYAN.map(function (c, k) { return Math.round(c + (AMBER[k] - c) * m); }).join();
+      }
+
+      // Depth of field, here and there: the focus drifts between the stories and the others go soft.
+      // About half the time everything is sharp. The compositor does the blurring.
+      function focus(now) {
+        var depth = Math.max(0, LFO.focus(now)), on = 1 + LFO.rack(now);   // 0 coarse ... 2 fine
+        LAYERS.forEach(function (L, i) {
+          var b = Math.round(4 * 1.2 * depth * Math.max(0, Math.abs(i - on) - 0.3)) / 4;
+          if (b !== L.blur) { L.blur = b; L.canvas.style.filter = b ? 'blur(' + b + 'px)' : ''; }
+        });
+      }
+
       function render() {
         var now = clock;
-        ctx.clearRect(0, 0, 2 * side, side);
-        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        tint(now); focus(now);
         // Painted a quarter brighter than wanted, so the glow LFO can lift it as well as dim it.
         if (backDirty) paintBackdrop(bctx, 'rgba(255,255,255,0.056)', 'rgba(255,255,255,0.015)', 'rgba(255,255,255,0.075)');
         var fade = Math.round(100 * Math.min(1, ghost * mod.glow / 1.25)) / 100;
         if (fade !== render.fade) back.style.opacity = render.fade = fade;   // the compositor does the rest
-        LAYERS.forEach(drawTrails);
-        snakes.concat(shades).sort(function (a, b) { return a.z - b.z; }).forEach(drawSnake);   // far ones first
-        ctx.lineWidth = 1;
-        sparks.forEach(function (p) {                                                   // a birth
-          var q = pointAt(p.L, p.s), k = 1 - (now - p.born) / 0.8, r = 1 + 2.5 * (1 - k);
-          ctx.strokeStyle = 'rgba(237,237,237,' + (0.6 * k * (0.25 + 0.75 * p.z)).toFixed(3) + ')';
-          ctx.strokeRect(q[0] - r, q[1] - r, 2 * r, 2 * r);
+        var all = snakes.concat(shades).sort(function (a, b) { return a.z - b.z; });   // far ones first
+        LAYERS.forEach(function (L) {
+          ctx = L.ctx;
+          ctx.clearRect(0, 0, 2 * side, side);
+          ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+          drawTrails(L);
+          all.forEach(function (s) { if (s.L === L) drawSnake(s); });
+          ctx.lineWidth = 1;
+          sparks.forEach(function (p) {                                                 // a birth
+            if (p.L !== L) return;
+            var q = pointAt(p.L, p.s), k = 1 - (now - p.born) / 0.8, r = 1 + 2.5 * (1 - k);
+            ctx.strokeStyle = 'rgba(237,237,237,' + (0.6 * k * (0.25 + 0.75 * p.z)).toFixed(3) + ')';
+            ctx.strokeRect(q[0] - r, q[1] - r, 2 * r, 2 * r);
+          });
         });
       }
 
       // Reduced motion: the letters, still, in the fine field. The snakes' canvas is left empty.
       function drawStill() {
         updateMask(clock);
-        ctx.clearRect(0, 0, 2 * side, side);
+        LAYERS.forEach(function (L) { L.ctx.clearRect(0, 0, 2 * side, side); L.canvas.style.filter = ''; L.blur = 0; });
         paintBackdrop(bctx, '#0c0c0c', '#141414', '#5a5a5a');
         back.style.opacity = render.fade = 1;
         backDirty = true;                                // painted in still colours; repaint when moving

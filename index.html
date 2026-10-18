@@ -61,6 +61,7 @@
     // that fade, bud and meet and have children, and die of crowding or old age. The O turns into
     // an X and back, and a few slow LFOs with drifting rates push tempo, morph, wobble and trails.
     // Every 2-4 changes of kind there's a max: for a few seconds everything comes alive.
+    // Two black snakes cut through the letters and eat the trails.
     // Speed: the backdrop is its own canvas, redrawn only when the letters change; snake bodies are drawn
     // in a few runs of grey, and nothing runs while the field is hidden or scrolled away.
     (function () {
@@ -208,7 +209,7 @@
         return L.last / 2;
       }
 
-      var snakes = [], kind = null, sparks = [];
+      var snakes = [], kind = null, sparks = [], shades = [], shadeAt = 0;
       var ghost = 0, ghostTarget = 1;
       var nextSwitch = 0, spawnAt = 0, renewAt = 0;
       var side, backDirty = true, clock = 0, running = false, onScreen = true;
@@ -224,8 +225,8 @@
       // A snake's own speed (pace) and length are kept in 27-cell units so children can inherit them.
       function depthSpeed(z) { return 0.45 + 0.85 * z; }
 
-      function makeSnake(k, L, h, dir, z, len, pace, gen, now) {
-        snakes.push({
+      function makeSnake(k, L, h, dir, z, len, pace, gen, now, into) {
+        (into || snakes).push({
           L: L, h: h, t: h,                              // head and tail, as positions along the path
           dir: dir, z: z, len27: len, pace: pace,
           len: len * L.scale, base: pace * L.scale * L.pace * depthSpeed(z), v: 0,
@@ -246,6 +247,26 @@
         }
       }
 
+      // ---- Shades ------------------------------------------------------------------------
+      // Black snakes: negative space. Two at a time, nearly always, slow and long. They
+      // cut through the letters and eat the trails, leaving a dark wake. A max clears them; they come back after.
+      var SHADE = { name: 'shade', pause: 0.15, turn: 0.05, stay: 0.92, layers: [0.4, 0.6, 0] };
+
+      function shadeUp(now) {
+        if (max || renewAt || shades.filter(function (s) { return !s.dying; }).length >= 2) return;
+        var L = pickLayer(SHADE.layers);
+        makeSnake(SHADE, L, randomInside(L), rand() < 0.5 ? 1 : -1, 0.5 + rand() * 0.5, 20 + rand() * 25, 1.6 + rand() * 1.6, 0, now, shades);
+      }
+
+      function shadeLife(now, dt) {
+        shades.forEach(function (s) {
+          if (now - s.born > s.life || (s.outFor > 4 && rand() < 0.5 * dt)) s.dying = true;
+          var L = s.L, a = Math.max(0, Math.floor(Math.min(s.h, s.t))), b = Math.min(L.last - 1, Math.ceil(Math.max(s.h, s.t)) - 1);
+          for (var j = a; j <= b; j++) L.heat[j] *= 1 - s.alpha;   // eats the light it passes over
+        });
+        shades = shades.filter(function (s) { return !(s.dying && s.alpha <= 0); });
+      }
+
       // ---- Max ---------------------------------------------------------------------------
       // Every 2-4 changes of kind, everything comes alive for 5-7 seconds. Each time it's built
       // differently: a burst of every kind and a rush of speed, plus some of a held breath before
@@ -263,6 +284,7 @@
         };
         max.end = now + max.hold + max.dur;
         burst(Math.round(20 + rand() * 20), now);
+        shades.forEach(function (s) { s.dying = true; });   // the light wins
         rounds = 0; roundsToMax = 2 + Math.floor(rand() * 3);
         nextSwitch = max.end + 0.6;                      // then a new kind calms it down
       }
@@ -292,7 +314,7 @@
         if (++rounds >= roundsToMax && !max) { startMax(now); return; }
         kind = pickKind(kind);
         if (rand() < 0.25) {                             // sometimes the field itself changes
-          snakes.forEach(function (s) { s.dying = true; });
+          snakes.concat(shades).forEach(function (s) { s.dying = true; });
           renewAt = now + 1.4; ghostTarget = 0;
         } else {
           snakes.forEach(function (s) { if (rand() < 0.7) s.dying = true; });   // a few live on
@@ -463,6 +485,14 @@
         var L = s.L, dir = s.h > s.t ? 1 : -1, span = Math.abs(s.h - s.t), stops = [s.t];
         for (var k = dir > 0 ? Math.floor(s.t) + 1 : Math.ceil(s.t) - 1; dir > 0 ? k < s.h : k > s.h; k += dir) stops.push(k);
         stops.push(s.h);
+        if (s.kind === SHADE) {                          // a wide black cut over everything behind it, faintly rimmed
+          var w = L.cell * (0.5 + 0.3 * s.z);
+          ctx.beginPath();
+          stops.forEach(function (q, i) { var p = pointAt(L, q); if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); });
+          ctx.lineWidth = w + 2; ctx.strokeStyle = 'rgba(237,237,237,' + (0.22 * s.alpha).toFixed(3) + ')'; ctx.stroke();
+          ctx.lineWidth = w; ctx.strokeStyle = 'rgba(0,0,0,' + s.alpha.toFixed(2) + ')'; ctx.stroke();
+          return;
+        }
         var near = Math.min(1, (0.25 + 0.75 * s.z) * (0.3 + 0.7 * s.inn) * (1 + 0.6 * rush));
         ctx.lineWidth = Math.max(0.4, L.width * (0.45 + 0.75 * s.z));
         // Solid greys (brightness times opacity, over black) so the joints don't double up, in steps
@@ -510,7 +540,8 @@
         if (spawnAt && now >= spawnAt) { spawnAt = 0; spawn(kind, now); }
 
         if (now - maskAt > 0.12) updateMask(now);
-        snakes.forEach(function (s) { move(s, dt, now); });
+        if (now >= shadeAt) { shadeUp(now); shadeAt = now + 1; }
+        snakes.concat(shades).forEach(function (s) { move(s, dt, now); });
         if (!renewAt) live(now, dt);
         snakes = snakes.filter(function (s) { return !(s.dying && s.alpha <= 0); });
         sparks = sparks.filter(function (p) { return now - p.born < 0.8; });
@@ -522,6 +553,7 @@
           var L = s.L, a = Math.max(0, Math.floor(Math.min(s.h, s.t))), b = Math.min(L.last - 1, Math.ceil(Math.max(s.h, s.t)) - 1);
           for (var j = a; j <= b; j++) L.heat[j] = Math.max(L.heat[j], s.alpha * s.z);
         });
+        shadeLife(now, dt);
         ghost += (ghostTarget - ghost) * Math.min(1, dt * 1.5);
       }
 
@@ -534,7 +566,7 @@
         var fade = Math.round(100 * Math.min(1, ghost * mod.glow / 1.25)) / 100;
         if (fade !== render.fade) back.style.opacity = render.fade = fade;   // the compositor does the rest
         LAYERS.forEach(drawTrails);
-        snakes.slice().sort(function (a, b) { return a.z - b.z; }).forEach(drawSnake);   // far ones first
+        snakes.concat(shades).sort(function (a, b) { return a.z - b.z; }).forEach(drawSnake);   // far ones first
         ctx.lineWidth = 1;
         sparks.forEach(function (p) {                                                   // a birth
           var q = pointAt(p.L, p.s), k = 1 - (now - p.born) / 0.8, r = 1 + 2.5 * (1 - k);
@@ -554,7 +586,7 @@
 
       function start() {
         if (running || !onScreen || still) return;
-        if (!kind) { kind = pickKind(null); spawnAt = clock + 0.4; nextSwitch = clock + 8 + rand() * 5; }
+        if (!kind) { kind = pickKind(null); spawnAt = clock + 0.4; nextSwitch = clock + 8 + rand() * 5; shadeAt = clock + 0.5; }
         running = true; frame.prev = 0;
         requestAnimationFrame(frame);
       }

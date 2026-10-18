@@ -60,6 +60,7 @@
     // Snakes keep to the letters, mostly. Every 8-13 s a different kind takes over. They leave trails
     // that fade, bud and meet and have children, and die of crowding or old age. The O turns into
     // an X and back, and a few slow LFOs with drifting rates push tempo, morph, wobble and trails.
+    // Every 2-4 changes of kind there's a max: for a few seconds everything comes alive.
     // Speed: the backdrop is its own canvas, redrawn only when the letters change; snake bodies are drawn
     // in a few runs of grey, and nothing runs while the field is hidden or scrolled away.
     (function () {
@@ -245,7 +246,50 @@
         }
       }
 
+      // ---- Max ---------------------------------------------------------------------------
+      // Every 2-4 changes of kind, everything comes alive for 5-7 seconds. Each time it's built
+      // differently: a burst of every kind and a rush of speed, plus some of a held breath before
+      // it, the letters swapping, a wave of births, and snakes spilling out of the letters.
+      // Brightness ramps up and down; nothing flashes.
+      var rounds = 0, roundsToMax = 2 + Math.floor(rand() * 3), max = null, rush = 0, stayNow = 1;
+      var MAX_CAP = 90;
+
+      function startMax(now) {
+        max = {
+          start: now, hold: rand() < 0.4 ? 0.5 + rand() * 0.5 : 0,
+          dur: 5 + rand() * 2.5, boost: 1.8 + rand() * 1.4,
+          flip: rand() < 0.5, bloom: rand() < 0.5, bloomed: false,
+          stay: rand() < 0.5 ? 0.3 + rand() * 0.4 : 1
+        };
+        max.end = now + max.hold + max.dur;
+        burst(Math.round(20 + rand() * 20), now);
+        rounds = 0; roundsToMax = 2 + Math.floor(rand() * 3);
+        nextSwitch = max.end + 0.6;                      // then a new kind calms it down
+      }
+
+      function burst(n, now) {                           // every kind at once, every depth
+        for (var i = 0; i < n; i++) {
+          var k = pickKind(null), L = pickLayer(k.layers);
+          makeSnake(k, L, randomInside(L), rand() < 0.5 ? 1 : -1, 0.35 + rand() * 0.65, between(k.len), between(k.v), 0, now);
+        }
+      }
+
+      function bloom(now) {                              // a wave of births
+        snakes.filter(function (s) { return !s.dying; }).forEach(function (s) {
+          if (snakes.length < MAX_CAP && rand() < 0.6) bud(s, null, s.h, now);
+        });
+      }
+
+      // 0 to 1 and back: up in 0.6 s after any held breath, down over the last 1.8 s.
+      function maxLevel(now) {
+        if (!max) return 0;
+        if (now >= max.end) { max = null; return 0; }
+        var t = now - max.start - max.hold;
+        return t < 0 ? 0 : Math.min(1, t / 0.6, (max.end - now) / 1.8);
+      }
+
       function switchKind(now) {
+        if (++rounds >= roundsToMax && !max) { startMax(now); return; }
         kind = pickKind(kind);
         if (rand() < 0.25) {                             // sometimes the field itself changes
           snakes.forEach(function (s) { s.dying = true; });
@@ -286,7 +330,7 @@
         var ahead = s.dir > 0 ? Math.floor(s.h) + 1 : Math.ceil(s.h) - 1;
         if (ahead !== s.ahead && ahead >= 0 && ahead <= L.last) {
           s.ahead = ahead;
-          if (L.inside[ahead - s.dir] && !L.inside[ahead] && rand() < k.stay) s.turning = true;
+          if (L.inside[ahead - s.dir] && !L.inside[ahead] && rand() < k.stay * stayNow) s.turning = true;
         }
       }
 
@@ -317,20 +361,20 @@
       }
 
       function live(now, dt) {
-        var alive = snakes.filter(function (s) { return !s.dying; });
+        var alive = snakes.filter(function (s) { return !s.dying; }), cap = max ? MAX_CAP : CAP;
         alive.forEach(function (s) {
           if (now - s.born > s.life) { s.dying = true; return; }
-          if (s.outFor > 2.5 && rand() < 0.6 * dt) { s.dying = true; return; }
+          if (s.outFor > 2.5 && rush < 0.3 && rand() < 0.6 * dt) { s.dying = true; return; }   // strays may roam in a max
           var crowd = alive.filter(function (o) { return o !== s && o.L === s.L && Math.abs(o.h - s.h) < 25 * s.L.scale; }).length;
-          if (crowd >= 6 && rand() < 0.2 * dt) { s.dying = true; return; }
-          if (crowd <= 3 && s.inn > 0.9 && alive.length < CAP && grown(s, now) && rand() < 0.07 * dt) bud(s, null, s.t, now);
+          if (!max && crowd >= 6 && rand() < 0.2 * dt) { s.dying = true; return; }
+          if (crowd <= 3 && s.inn > 0.9 && alive.length < cap && grown(s, now) && rand() < 0.07 * dt) bud(s, null, s.t, now);
         });
         for (var i = 0; i < alive.length; i++) for (var j = i + 1; j < alive.length; j++) {
           var a = alive[i], b = alive[j];
           if (a.L !== b.L || a.dir === b.dir || a.turning || b.turning || Math.abs(a.h - b.h) > 1.2 || (b.h - a.h) * a.dir < 0) continue;
           if (!grown(a, now) || !grown(b, now)) continue;
           a.turning = b.turning = true;
-          if (alive.length < CAP && rand() < 0.6) bud(a, b, (a.h + b.h) / 2, now);
+          if (alive.length < cap && rand() < 0.6) bud(a, b, (a.h + b.h) / 2, now);
           else a.cool = b.cool = now + 3;
         }
       }
@@ -419,7 +463,7 @@
         var L = s.L, dir = s.h > s.t ? 1 : -1, span = Math.abs(s.h - s.t), stops = [s.t];
         for (var k = dir > 0 ? Math.floor(s.t) + 1 : Math.ceil(s.t) - 1; dir > 0 ? k < s.h : k > s.h; k += dir) stops.push(k);
         stops.push(s.h);
-        var near = (0.25 + 0.75 * s.z) * (0.3 + 0.7 * s.inn);
+        var near = Math.min(1, (0.25 + 0.75 * s.z) * (0.3 + 0.7 * s.inn) * (1 + 0.6 * rush));
         ctx.lineWidth = Math.max(0.4, L.width * (0.45 + 0.75 * s.z));
         // Solid greys (brightness times opacity, over black) so the joints don't double up, in steps
         // of 4 so a body is a few strokes rather than one per cell.
@@ -450,6 +494,15 @@
       function step(dt) {
         var now = clock += dt;
         modulate(now);
+        rush = maxLevel(now); stayNow = 1;
+        if (max) {
+          if (now < max.start + max.hold) mod.tempo *= 0.08;   // the held breath
+          mod.tempo *= 1 + (max.boost - 1) * rush;
+          mod.trail *= 1 + 1.5 * rush; mod.glow *= 1 + 0.5 * rush; mod.wobble *= 1 + 1.5 * rush;
+          stayNow = 1 - (1 - max.stay) * rush;
+          if (max.flip) morphPhase += dt * rush * 0.5 / (max.dur - 1.2);   // about half a cycle: O and X swap
+          if (max.bloom && !max.bloomed && rush >= 1) { max.bloomed = true; bloom(now); }
+        }
         morphPhase += dt * mod.morph / MORPH;
 
         if (now >= nextSwitch && !spawnAt && !renewAt) switchKind(now);
